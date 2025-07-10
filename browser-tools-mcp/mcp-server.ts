@@ -4,6 +4,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import path from "path";
 import fs from "fs";
+import https from "https";
+
+// Allow self-signed certificates for development
+if (process.env.NODE_ENV !== 'production') {
+  process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+}
 
 // Create the MCP server
 const server = new McpServer({
@@ -14,6 +20,7 @@ const server = new McpServer({
 // Track the discovered server connection
 let discoveredHost = "127.0.0.1";
 let discoveredPort = 3025;
+let discoveredProtocol = "http";
 let serverDiscovered = false;
 
 // Function to get the default port from environment variable or default
@@ -78,38 +85,49 @@ async function discoverServer(): Promise<boolean> {
   // Try to find the server
   for (const host of hosts) {
     for (const port of ports) {
-      try {
-        console.log(`Checking ${host}:${port}...`);
+      // Try HTTPS first for port 443, then HTTP
+      const protocols = port === 443 ? ['https'] : ['http', 'https'];
+      
+      for (const protocol of protocols) {
+        try {
+          console.log(`Checking ${protocol}://${host}:${port}...`);
 
-        // Use the identity endpoint for validation
-        const response = await fetch(`http://${host}:${port}/.identity`, {
-          signal: AbortSignal.timeout(1000), // 1 second timeout
-        });
+          // Use the identity endpoint for validation
+          const response = await fetch(`${protocol}://${host}:${port}/.identity`, {
+            signal: AbortSignal.timeout(1000), // 1 second timeout
+          });
 
-        if (response.ok) {
-          const identity = await response.json();
+          if (response.ok) {
+            const identity = await response.json();
 
-          // Verify this is actually our server by checking the signature
-          if (identity.signature === "mcp-browser-connector-24x7") {
-            console.log(`Successfully found server at ${host}:${port}`);
+            // Verify this is actually our server by checking the signature
+            if (identity.signature === "mcp-browser-connector-24x7") {
+              console.log(`Successfully found server at ${protocol}://${host}:${port}`);
 
-            // Save the discovered connection
-            discoveredHost = host;
-            discoveredPort = port;
-            serverDiscovered = true;
+              // Save the discovered connection
+              discoveredHost = host;
+              discoveredPort = port;
+              discoveredProtocol = protocol;
+              serverDiscovered = true;
 
-            return true;
+              return true;
+            }
           }
+        } catch (error: any) {
+          // Ignore connection errors during discovery
+          console.error(`Error checking ${protocol}://${host}:${port}: ${error.message}`);
         }
-      } catch (error: any) {
-        // Ignore connection errors during discovery
-        console.error(`Error checking ${host}:${port}: ${error.message}`);
       }
     }
   }
 
   console.error("No server found during discovery");
   return false;
+}
+
+// Helper function to build the base URL
+function getServerUrl(): string {
+  return `${discoveredProtocol}://${discoveredHost}:${discoveredPort}`;
 }
 
 // Wrapper function to ensure server connection before making requests
@@ -177,9 +195,7 @@ async function withServerConnection<T>(
 // We'll define our tools that retrieve data from the browser connector
 server.tool("getConsoleLogs", "Check our browser logs", async () => {
   return await withServerConnection(async () => {
-    const response = await fetch(
-      `http://${discoveredHost}:${discoveredPort}/console-logs`
-    );
+    const response = await fetch(`${getServerUrl()}/console-logs`);
     const json = await response.json();
     return {
       content: [
@@ -197,9 +213,7 @@ server.tool(
   "Check our browsers console errors",
   async () => {
     return await withServerConnection(async () => {
-      const response = await fetch(
-        `http://${discoveredHost}:${discoveredPort}/console-errors`
-      );
+      const response = await fetch(`${getServerUrl()}/console-errors`);
       const json = await response.json();
       return {
         content: [
@@ -215,9 +229,7 @@ server.tool(
 
 server.tool("getNetworkErrors", "Check our network ERROR logs", async () => {
   return await withServerConnection(async () => {
-    const response = await fetch(
-      `http://${discoveredHost}:${discoveredPort}/network-errors`
-    );
+    const response = await fetch(`${getServerUrl()}/network-errors`);
     const json = await response.json();
     return {
       content: [
@@ -233,9 +245,7 @@ server.tool("getNetworkErrors", "Check our network ERROR logs", async () => {
 
 server.tool("getNetworkLogs", "Check ALL our network logs", async () => {
   return await withServerConnection(async () => {
-    const response = await fetch(
-      `http://${discoveredHost}:${discoveredPort}/network-success`
-    );
+    const response = await fetch(`${getServerUrl()}/network-success`);
     const json = await response.json();
     return {
       content: [
@@ -255,7 +265,7 @@ server.tool(
     return await withServerConnection(async () => {
       try {
         const response = await fetch(
-          `http://${discoveredHost}:${discoveredPort}/capture-screenshot`,
+          `${getServerUrl()}/capture-screenshot`,
           {
             method: "POST",
           }
@@ -304,7 +314,7 @@ server.tool(
   async () => {
     return await withServerConnection(async () => {
       const response = await fetch(
-        `http://${discoveredHost}:${discoveredPort}/selected-element`
+        `${getServerUrl()}/selected-element`
       );
       const json = await response.json();
       return {
@@ -322,7 +332,7 @@ server.tool(
 server.tool("wipeLogs", "Wipe all browser logs from memory", async () => {
   return await withServerConnection(async () => {
     const response = await fetch(
-      `http://${discoveredHost}:${discoveredPort}/wipelogs`,
+      `${getServerUrl()}/wipelogs`,
       {
         method: "POST",
       }
@@ -358,10 +368,10 @@ server.tool(
       try {
         // Simplified approach - let the browser connector handle the current tab and URL
         console.log(
-          `Sending POST request to http://${discoveredHost}:${discoveredPort}/accessibility-audit`
+          `Sending POST request to ${getServerUrl()}/accessibility-audit`
         );
         const response = await fetch(
-          `http://${discoveredHost}:${discoveredPort}/accessibility-audit`,
+          `${getServerUrl()}/accessibility-audit`,
           {
             method: "POST",
             headers: {
@@ -441,10 +451,10 @@ server.tool(
       try {
         // Simplified approach - let the browser connector handle the current tab and URL
         console.log(
-          `Sending POST request to http://${discoveredHost}:${discoveredPort}/performance-audit`
+          `Sending POST request to ${getServerUrl()}/performance-audit`
         );
         const response = await fetch(
-          `http://${discoveredHost}:${discoveredPort}/performance-audit`,
+          `${getServerUrl()}/performance-audit`,
           {
             method: "POST",
             headers: {
@@ -523,10 +533,10 @@ server.tool(
     return await withServerConnection(async () => {
       try {
         console.log(
-          `Sending POST request to http://${discoveredHost}:${discoveredPort}/seo-audit`
+          `Sending POST request to ${getServerUrl()}/seo-audit`
         );
         const response = await fetch(
-          `http://${discoveredHost}:${discoveredPort}/seo-audit`,
+          `${getServerUrl()}/seo-audit`,
           {
             method: "POST",
             headers: {
@@ -1355,10 +1365,10 @@ server.tool(
     return await withServerConnection(async () => {
       try {
         console.log(
-          `Sending POST request to http://${discoveredHost}:${discoveredPort}/best-practices-audit`
+          `Sending POST request to ${getServerUrl()}/best-practices-audit`
         );
         const response = await fetch(
-          `http://${discoveredHost}:${discoveredPort}/best-practices-audit`,
+          `${getServerUrl()}/best-practices-audit`,
           {
             method: "POST",
             headers: {
