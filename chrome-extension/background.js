@@ -1,3 +1,9 @@
+// Import shared constants for service worker
+importScripts('constants.js');
+
+// Extract constants from the imported object
+const { DEFAULT_LOCALHOSTS, DEFAULT_SERVER_PORT, HTTPS_DEFAULT_PORT, HTTP_DEFAULT_PORT, HTTPS_PROTOCOL, HTTP_PROTOCOL } = BROWSER_TOOLS_CONSTANTS;
+
 // Listen for messages from the devtools panel
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_CURRENT_URL" && message.tabId) {
@@ -36,8 +42,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // First get the server settings
     chrome.storage.local.get(["browserConnectorSettings"], (result) => {
       const settings = result.browserConnectorSettings || {
-        serverHost: "localhost",
-        serverPort: 3025,
+        serverHost: DEFAULT_LOCALHOSTS[0],
+        serverPort: DEFAULT_SERVER_PORT,
       };
 
       // Validate server identity first
@@ -70,10 +76,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+// Helper function to construct server URL with appropriate protocol
+function getServerUrl(host, port, path = '') {
+  // If host already includes protocol, use it as-is
+  if (host.startsWith(HTTP_PROTOCOL) || host.startsWith(HTTPS_PROTOCOL)) {
+    // Extract protocol and hostname
+    const url = new URL(host);
+    // If a custom port is specified and it's not the default for the protocol, include it
+    if (port && port !== HTTP_DEFAULT_PORT && port !== HTTPS_DEFAULT_PORT) {
+      return `${url.protocol}//${url.hostname}:${port}${path}`;
+    }
+    return `${host}${path}`;
+  }
+  
+  // Default behavior: try HTTPS for standard HTTPS port, otherwise HTTP
+  const protocol = (port === HTTPS_DEFAULT_PORT) ? HTTPS_PROTOCOL : HTTP_PROTOCOL;
+  return `${protocol}${host}:${port}${path}`;
+}
+
 // Validate server identity
 async function validateServerIdentity(host, port) {
   try {
-    const response = await fetch(`http://${host}:${port}/.identity`, {
+    const response = await fetch(getServerUrl(host, port, '/.identity'), {
       signal: AbortSignal.timeout(3000), // 3 second timeout
     });
 
@@ -226,8 +250,8 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
   // Get the saved settings
   chrome.storage.local.get(["browserConnectorSettings"], async (result) => {
     const settings = result.browserConnectorSettings || {
-      serverHost: "localhost",
-      serverPort: 3025,
+      serverHost: DEFAULT_LOCALHOSTS[0],
+      serverPort: DEFAULT_SERVER_PORT,
     };
 
     // Maximum number of retry attempts
@@ -238,7 +262,7 @@ async function updateServerWithUrl(tabId, url, source = "background_update") {
     while (retryCount < maxRetries && !success) {
       try {
         // Send the URL to the server
-        const serverUrl = `http://${settings.serverHost}:${settings.serverPort}/current-url`;
+        const serverUrl = getServerUrl(settings.serverHost, settings.serverPort, '/current-url');
         console.log(
           `Attempt ${
             retryCount + 1
@@ -303,8 +327,8 @@ async function retestConnectionOnRefresh(tabId) {
   // Get the saved settings
   chrome.storage.local.get(["browserConnectorSettings"], async (result) => {
     const settings = result.browserConnectorSettings || {
-      serverHost: "localhost",
-      serverPort: 3025,
+      serverHost: DEFAULT_LOCALHOSTS[0],
+      serverPort: DEFAULT_SERVER_PORT,
     };
 
     // Test the connection with the last known host and port
@@ -389,7 +413,7 @@ function captureAndSendScreenshot(message, settings, sendResponse) {
           }
 
           // Send screenshot data to browser connector using configured settings
-          const serverUrl = `http://${settings.serverHost}:${settings.serverPort}/screenshot`;
+          const serverUrl = getServerUrl(settings.serverHost, settings.serverPort, '/screenshot');
           console.log(`Sending screenshot to ${serverUrl}`);
 
           fetch(serverUrl, {

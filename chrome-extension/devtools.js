@@ -1,5 +1,44 @@
 // devtools.js
 
+// Get shared constants from constants.js
+const { DEFAULT_LOCALHOSTS, DEFAULT_SERVER_PORT, HTTPS_DEFAULT_PORT, HTTP_DEFAULT_PORT, HTTPS_PROTOCOL, HTTP_PROTOCOL } = window.BROWSER_TOOLS_CONSTANTS;
+
+// Helper function to construct server URL with appropriate protocol
+function getServerUrl(host, port, path = '') {
+  // If host already includes protocol, use it as-is
+  if (host.startsWith(HTTP_PROTOCOL) || host.startsWith(HTTPS_PROTOCOL)) {
+    // Extract protocol and hostname
+    const url = new URL(host);
+    // If a custom port is specified and it's not the default for the protocol, include it
+    if (port && port !== HTTP_DEFAULT_PORT && port !== HTTPS_DEFAULT_PORT) {
+      return `${url.protocol}//${url.hostname}:${port}${path}`;
+    }
+    return `${host}${path}`;
+  }
+  
+  // Default behavior: try HTTPS for standard HTTPS port, otherwise HTTP
+  const protocol = (port === HTTPS_DEFAULT_PORT) ? HTTPS_PROTOCOL : HTTP_PROTOCOL;
+  return `${protocol}${host}:${port}${path}`;
+}
+
+// Helper function to get WebSocket URL with appropriate protocol
+function getWebSocketUrl(host, port, path = '') {
+  // If host already includes protocol, convert to WebSocket protocol
+  if (host.startsWith(HTTP_PROTOCOL) || host.startsWith(HTTPS_PROTOCOL)) {
+    const url = new URL(host);
+    const wsProtocol = url.protocol === 'https:' ? 'wss://' : 'ws://';
+    // If a custom port is specified and it's not the default for the protocol, include it
+    if (port && port !== HTTP_DEFAULT_PORT && port !== HTTPS_DEFAULT_PORT) {
+      return `${wsProtocol}${url.hostname}:${port}${path}`;
+    }
+    return `${wsProtocol}${url.hostname}${path}`;
+  }
+  
+  // Default behavior: use WSS for standard HTTPS port, otherwise WS
+  const wsProtocol = (port === HTTPS_DEFAULT_PORT) ? 'wss://' : 'ws://';
+  return `${wsProtocol}${host}:${port}${path}`;
+}
+
 // Store settings with defaults
 let settings = {
   logLimit: 50,
@@ -9,8 +48,8 @@ let settings = {
   showRequestHeaders: false,
   showResponseHeaders: false,
   screenshotPath: "", // Add new setting for screenshot path
-  serverHost: "localhost", // Default server host
-  serverPort: 3025, // Default server port
+  serverHost: DEFAULT_LOCALHOSTS[0], // Default server host
+  serverPort: DEFAULT_SERVER_PORT, // Default server port
   allowAutoPaste: false, // Default auto-paste setting
 };
 
@@ -328,7 +367,7 @@ async function sendToBrowserConnector(logData) {
     );
   }
 
-  const serverUrl = `http://${settings.serverHost}:${settings.serverPort}/extension-log`;
+  const serverUrl = getServerUrl(settings.serverHost, settings.serverPort, '/extension-log');
   console.log(`Sending log to ${serverUrl}`);
 
   fetch(serverUrl, {
@@ -359,7 +398,7 @@ async function validateServerIdentity() {
 
     // Use fetch with a timeout to prevent long-hanging requests
     const response = await fetch(
-      `http://${settings.serverHost}:${settings.serverPort}/.identity`,
+      getServerUrl(settings.serverHost, settings.serverPort, '/.identity'),
       {
         signal: AbortSignal.timeout(3000), // 3 second timeout
       }
@@ -432,7 +471,7 @@ async function validateServerIdentity() {
 function wipeLogs() {
   console.log("Wiping all logs...");
 
-  const serverUrl = `http://${settings.serverHost}:${settings.serverPort}/wipelogs`;
+  const serverUrl = getServerUrl(settings.serverHost, settings.serverPort, '/wipelogs');
   console.log(`Sending wipe request to ${serverUrl}`);
 
   fetch(serverUrl, {
@@ -799,7 +838,7 @@ async function setupWebSocket() {
   // Reset reconnect flag since validation succeeded
   reconnectAfterValidation = false;
 
-  const wsUrl = `ws://${settings.serverHost}:${settings.serverPort}/extension-ws`;
+  const wsUrl = getWebSocketUrl(settings.serverHost, settings.serverPort, '/extension-ws');
   console.log(`Connecting to WebSocket at ${wsUrl}`);
 
   try {

@@ -1,3 +1,24 @@
+// Get shared constants from constants.js
+const { DEFAULT_LOCALHOSTS, DEFAULT_SERVER_PORT, HTTPS_DEFAULT_PORT, HTTP_DEFAULT_PORT, HTTPS_PROTOCOL, HTTP_PROTOCOL } = window.BROWSER_TOOLS_CONSTANTS;
+
+// Helper function to construct server URL with appropriate protocol
+function getServerUrl(host, port, path = '') {
+  // If host already includes protocol, use it as-is
+  if (host.startsWith(HTTP_PROTOCOL) || host.startsWith(HTTPS_PROTOCOL)) {
+    // Extract protocol and hostname
+    const url = new URL(host);
+    // If a custom port is specified and it's not the default for the protocol, include it
+    if (port && port !== HTTP_DEFAULT_PORT && port !== HTTPS_DEFAULT_PORT) {
+      return `${url.protocol}//${url.hostname}:${port}${path}`;
+    }
+    return `${host}${path}`;
+  }
+  
+  // Default behavior: try HTTPS for standard HTTPS port, otherwise HTTP
+  const protocol = (port === HTTPS_DEFAULT_PORT) ? HTTPS_PROTOCOL : HTTP_PROTOCOL;
+  return `${protocol}${host}:${port}${path}`;
+}
+
 // Store settings
 let settings = {
   logLimit: 50,
@@ -8,8 +29,8 @@ let settings = {
   maxLogSize: 20000,
   screenshotPath: "",
   // Add server connection settings
-  serverHost: "localhost",
-  serverPort: 3025,
+  serverHost: DEFAULT_LOCALHOSTS[0],
+  serverPort: DEFAULT_SERVER_PORT,
   allowAutoPaste: false, // Default auto-paste setting
 };
 
@@ -21,6 +42,12 @@ let isDiscoveryInProgress = false;
 // Add an AbortController to cancel fetch operations
 let discoveryController = null;
 
+// Separate variables for discovered server (don't mix with user settings)
+let discoveredHost = null;
+let discoveredPort = null;
+let currentConnectionHost = null;
+let currentConnectionPort = null;
+
 // Load saved settings on startup
 chrome.storage.local.get(["browserConnectorSettings"], (result) => {
   if (result.browserConnectorSettings) {
@@ -31,8 +58,19 @@ chrome.storage.local.get(["browserConnectorSettings"], (result) => {
   // Create connection status banner at the top
   createConnectionBanner();
 
-  // Automatically discover server on panel load with quiet mode enabled
-  discoverServer(true);
+  // Only auto-discover if we don't have custom settings saved
+  // If user has HTTPS port or a protocol in host, they likely have a custom setup
+  const hasCustomSetup = settings.serverPort === HTTPS_DEFAULT_PORT || 
+                        settings.serverHost.includes('://') ||
+                        !DEFAULT_LOCALHOSTS.includes(settings.serverHost);
+  
+  if (!hasCustomSetup) {
+    // Automatically discover server on panel load with quiet mode enabled
+    discoverServer(true);
+  } else {
+    // Just test the saved connection (not a manual test)
+    testConnection(settings.serverHost, settings.serverPort, false);
+  }
 });
 
 // Add listener for connection status updates from background script (page refresh events)
@@ -406,17 +444,51 @@ screenshotPathInput.addEventListener("change", (e) => {
 
 // Add event listeners for server settings
 serverHostInput.addEventListener("change", (e) => {
-  settings.serverHost = e.target.value;
+  // Cancel any ongoing discovery when user manually changes settings
+  cancelOngoingDiscovery();
+  
+  const hostValue = e.target.value.trim();
+  settings.serverHost = hostValue;
+  
+  // Auto-detect port based on protocol
+  if (hostValue.startsWith(HTTPS_PROTOCOL)) {
+    // If port is still default HTTP port, switch to HTTPS default
+    if (settings.serverPort === DEFAULT_SERVER_PORT || settings.serverPort === HTTP_DEFAULT_PORT) {
+      settings.serverPort = HTTPS_DEFAULT_PORT;
+      serverPortInput.value = HTTPS_DEFAULT_PORT;
+    }
+  } else if (hostValue.startsWith(HTTP_PROTOCOL)) {
+    // If port is HTTPS default, switch to default HTTP port
+    if (settings.serverPort === HTTPS_DEFAULT_PORT) {
+      settings.serverPort = DEFAULT_SERVER_PORT;
+      serverPortInput.value = DEFAULT_SERVER_PORT;
+    }
+  }
+  
   saveSettings();
   // Automatically test connection when host is changed
   testConnection(settings.serverHost, settings.serverPort);
 });
 
 serverPortInput.addEventListener("change", (e) => {
+  // Cancel any ongoing discovery when user manually changes settings
+  cancelOngoingDiscovery();
+  
   settings.serverPort = parseInt(e.target.value, 10);
   saveSettings();
   // Automatically test connection when port is changed
   testConnection(settings.serverHost, settings.serverPort);
+});
+
+// Also add input event listeners to cancel discovery while typing
+serverHostInput.addEventListener("input", (e) => {
+  // Cancel any ongoing discovery when user starts typing
+  cancelOngoingDiscovery();
+});
+
+serverPortInput.addEventListener("input", (e) => {
+  // Cancel any ongoing discovery when user starts typing
+  cancelOngoingDiscovery();
 });
 
 // Add event listener for auto-paste checkbox
@@ -468,7 +540,7 @@ testConnectionButton.addEventListener("click", async () => {
 });
 
 // Function to test server connection
-async function testConnection(host, port) {
+async function testConnection(host, port, isManualTest = true) {
   // Cancel any ongoing discovery operations
   cancelOngoingDiscovery();
 
@@ -478,7 +550,7 @@ async function testConnection(host, port) {
 
   try {
     // Use the identity endpoint instead of .port for more reliable validation
-    const response = await fetch(`http://${host}:${port}/.identity`, {
+    const response = await fetch(getServerUrl(host, port, '/.identity'), {
       signal: AbortSignal.timeout(5000), // 5 second timeout
     });
 
@@ -491,13 +563,21 @@ async function testConnection(host, port) {
         statusText.textContent = `Connection failed: Found a server at ${host}:${port} but it's not the Browser Tools server`;
         serverConnected = false;
         updateConnectionBanner(false, null);
-        scheduleReconnectAttempt();
+        // Only schedule reconnect for automatic attempts, not manual tests
+        if (!isManualTest) {
+          scheduleReconnectAttempt();
+        }
         return false;
       }
 
       statusIcon.className = "status-indicator status-connected";
       statusText.textContent = `Connected successfully to ${identity.name} v${identity.version} at ${host}:${port}`;
       serverConnected = true;
+      
+      // Store the current connection info without modifying user settings
+      currentConnectionHost = host;
+      currentConnectionPort = parseInt(identity.port, 10);
+      
       updateConnectionBanner(true, identity);
 
       // Clear any scheduled reconnect attempts
@@ -506,12 +586,10 @@ async function testConnection(host, port) {
         reconnectAttemptTimeout = null;
       }
 
-      // Update settings if different port was discovered
+      // Don't update settings! Just notify if port is different
       if (parseInt(identity.port, 10) !== port) {
-        console.log(`Detected different port: ${identity.port}`);
-        settings.serverPort = parseInt(identity.port, 10);
-        serverPortInput.value = settings.serverPort;
-        saveSettings();
+        console.log(`Note: Server is actually running on port ${identity.port}, but keeping user setting as ${port}`);
+        statusText.textContent += ` (Server reports port ${identity.port})`;
       }
 
       return true;
@@ -525,7 +603,10 @@ async function testConnection(host, port) {
 
       // Now update the connection banner to show the reconnect button
       updateConnectionBanner(false, null);
-      scheduleReconnectAttempt();
+      // Only schedule reconnect for automatic attempts, not manual tests
+      if (!isManualTest) {
+        scheduleReconnectAttempt();
+      }
       return false;
     }
   } catch (error) {
@@ -538,7 +619,10 @@ async function testConnection(host, port) {
 
     // Now update the connection banner to show the reconnect button
     updateConnectionBanner(false, null);
-    scheduleReconnectAttempt();
+    // Only schedule reconnect for automatic attempts, not manual tests
+    if (!isManualTest) {
+      scheduleReconnectAttempt();
+    }
     return false;
   }
 }
@@ -574,7 +658,7 @@ async function tryServerConnection(host, port) {
 
     try {
       // Use identity endpoint for validation
-      const response = await fetch(`http://${host}:${port}/.identity`, {
+      const response = await fetch(getServerUrl(host, port, '/.identity'), {
         // Use a local controller for this specific request timeout
         // but also respect the global discovery cancellation
         signal: discoveryController
@@ -602,15 +686,44 @@ async function tryServerConnection(host, port) {
 
         console.log(`Successfully found server at ${host}:${port}`);
 
-        // Update settings with discovered server
-        settings.serverHost = host;
-        settings.serverPort = parseInt(identity.port, 10);
-        serverHostInput.value = settings.serverHost;
-        serverPortInput.value = settings.serverPort;
-        saveSettings();
+        const foundPort = parseInt(identity.port, 10);
+        
+        // Store discovered server info separately from user settings
+        discoveredHost = host;
+        discoveredPort = foundPort;
+        currentConnectionHost = host;
+        currentConnectionPort = foundPort;
 
-        statusIcon.className = "status-indicator status-connected";
-        statusText.textContent = `Discovered ${identity.name} v${identity.version} at ${host}:${identity.port}`;
+        // Check if this is the user's configured server or a newly discovered one
+        const isUserConfiguredServer = (host === settings.serverHost && foundPort === settings.serverPort);
+        
+        // Check if we're in a discovery operation that should update settings
+        const discoveryWithUpdate = isDiscoveryInProgress && window.currentDiscoveryUpdateSettings;
+        
+        if (discoveryWithUpdate && !isUserConfiguredServer) {
+          // User clicked "Auto-Discover Server" - update settings with found server
+          settings.serverHost = host;
+          settings.serverPort = foundPort;
+          serverHostInput.value = settings.serverHost;
+          serverPortInput.value = settings.serverPort;
+          saveSettings();
+          
+          statusIcon.className = "status-indicator status-connected";
+          statusText.textContent = `Discovered and connected to ${identity.name} v${identity.version} at ${host}:${foundPort}`;
+        } else if (!isUserConfiguredServer && !isDiscoveryInProgress) {
+          // This is a direct connection test, not auto-discovery
+          // Update the actual connection but don't change saved settings
+          statusIcon.className = "status-indicator status-connected";
+          statusText.textContent = `Connected to ${identity.name} v${identity.version} at ${host}:${foundPort}`;
+        } else if (isDiscoveryInProgress && !isUserConfiguredServer && !discoveryWithUpdate) {
+          // This is auto-discovery finding a different server (quiet/automatic mode)
+          statusIcon.className = "status-indicator status-connected";
+          statusText.textContent = `Discovered ${identity.name} v${identity.version} at ${host}:${foundPort} (Settings not changed)`;
+        } else {
+          // Connected to user's configured server
+          statusIcon.className = "status-indicator status-connected";
+          statusText.textContent = `Connected to ${identity.name} v${identity.version} at ${host}:${foundPort}`;
+        }
 
         // Update connection banner with server info
         updateConnectionBanner(true, identity);
@@ -653,13 +766,18 @@ async function tryServerConnection(host, port) {
 }
 
 // Server discovery function (extracted to be reusable)
-async function discoverServer(quietMode = false) {
+async function discoverServer(quietMode = false, updateSettings = false) {
   // Cancel any ongoing discovery operations before starting a new one
   cancelOngoingDiscovery();
 
   // Create a new AbortController for this discovery process
   discoveryController = new AbortController();
   isDiscoveryInProgress = true;
+
+  // Store whether we should update settings when a server is found
+  // This is true when user manually clicks "Auto-Discover Server" button
+  const shouldUpdateSettings = updateSettings || !quietMode;
+  window.currentDiscoveryUpdateSettings = shouldUpdateSettings;
 
   // In quiet mode, we don't show the connection status until we either succeed or fail completely
   if (!quietMode) {
@@ -681,7 +799,7 @@ async function discoverServer(quietMode = false) {
     });
 
     // Common IPs to try (in order of likelihood)
-    const hosts = ["localhost", "127.0.0.1"];
+    const hosts = DEFAULT_LOCALHOSTS;
 
     // Add the current configured host if it's not already in the list
     if (
@@ -702,7 +820,7 @@ async function discoverServer(quietMode = false) {
 
     // Build port list in a smart order:
     // 1. Start with current configured port
-    // 2. Add default port (3025)
+    // 2. Add default port
     // 3. Add sequential ports around the default (for fallback detection)
     const ports = [];
 
@@ -711,12 +829,12 @@ async function discoverServer(quietMode = false) {
     ports.push(configuredPort);
 
     // Add default port if it's not the same as configured
-    if (configuredPort !== 3025) {
-      ports.push(3025);
+    if (configuredPort !== DEFAULT_SERVER_PORT) {
+      ports.push(DEFAULT_SERVER_PORT);
     }
 
     // Add sequential fallback ports (from default up to default+10)
-    for (let p = 3026; p <= 3035; p++) {
+    for (let p = DEFAULT_SERVER_PORT + 1; p <= DEFAULT_SERVER_PORT + 10; p++) {
       if (p !== configuredPort) {
         // Avoid duplicates
         ports.push(p);
@@ -808,7 +926,7 @@ async function discoverServer(quietMode = false) {
     statusText.textContent = `Quick check failed. Starting full scan (${totalChecked}/${totalAttempts})...`;
 
     // First, scan through all ports on localhost/127.0.0.1 to find fallback ports quickly
-    const localHosts = ["localhost", "127.0.0.1"];
+    const localHosts = DEFAULT_LOCALHOSTS;
     for (const host of localHosts) {
       // Skip the first two ports on localhost if we already checked them in Phase 1
       const portsToCheck = uniquePorts.slice(
@@ -917,11 +1035,13 @@ async function discoverServer(quietMode = false) {
     if (discoveryController) {
       discoveryController = null;
     }
+    // Clean up the update settings flag
+    window.currentDiscoveryUpdateSettings = false;
   }
 }
 
 // Bind discover server button to the extracted function
-discoverServerButton.addEventListener("click", () => discoverServer(false));
+discoverServerButton.addEventListener("click", () => discoverServer(false, true));
 
 // Screenshot capture functionality
 captureScreenshotButton.addEventListener("click", () => {
@@ -956,7 +1076,7 @@ captureScreenshotButton.addEventListener("click", () => {
 // Add wipe logs functionality
 const wipeLogsButton = document.getElementById("wipe-logs");
 wipeLogsButton.addEventListener("click", () => {
-  const serverUrl = `http://${settings.serverHost}:${settings.serverPort}/wipelogs`;
+  const serverUrl = getServerUrl(settings.serverHost, settings.serverPort, '/wipelogs');
   console.log(`Sending wipe request to ${serverUrl}`);
 
   fetch(serverUrl, {
